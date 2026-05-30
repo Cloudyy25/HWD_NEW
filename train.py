@@ -34,9 +34,12 @@ import utils
 
 def preprocess_kdd(raw='Data/KDD.csv', out='Data/KDD_norm.csv'):
     """
-    Preprocessing KDD Cup 2018 — identik FGTI (tanpa outlier removal).
-    NaN → -200, lalu Z-score normalisasi.
-    Comparable langsung ke angka FGTI dan CSDI di paper.
+    Preprocessing KDD Cup 2018:
+      1. Sentinel ≥ 999000  → NaN   (kode sensor rusak di wind_direction)
+      2. Outlier  3×IQR     → NaN   (nilai ekstrem per kolom)
+      3. NaN                → -200  (missing marker untuk model)
+      4. Z-score normalisasi dari clean values
+      5. Simpan KDD_norm.csv, KDD_means.npy, KDD_stds.npy
     """
     if os.path.exists(out):
         print(f'Skip — {out} sudah ada')
@@ -46,10 +49,33 @@ def preprocess_kdd(raw='Data/KDD.csv', out='Data/KDD_norm.csv'):
     data = df.select_dtypes(include=[np.number]).to_numpy().astype(float)
     N, K = data.shape
 
-    # NaN → -200 (missing marker)
+    # ── Step 1: Sentinel → NaN ───────────────────────────────────────────────
+    n_sent = (data >= 999000).sum()
+    data[data >= 999000] = np.nan
+    print(f'[preprocess_kdd] Sentinel ≥999000 → NaN : {n_sent} sel')
+
+    # ── Step 2: Outlier 3×IQR → NaN ─────────────────────────────────────────
+    n_out = 0
+    for j in range(K):
+        col   = data[:, j]
+        valid = col[~np.isnan(col)]
+        if len(valid) < 10:
+            continue
+        q1, q3 = np.percentile(valid, 25), np.percentile(valid, 75)
+        iqr    = q3 - q1
+        lo, hi = q1 - 3.0 * iqr, q3 + 3.0 * iqr
+        mask_out = (~np.isnan(col)) & ((col < lo) | (col > hi))
+        n_out   += mask_out.sum()
+        data[mask_out, j] = np.nan
+    print(f'[preprocess_kdd] Outlier 3×IQR     → NaN : {n_out} sel')
+
+    # ── Step 3: NaN → -200 ───────────────────────────────────────────────────
+    total_missing = np.isnan(data).sum()
+    print(f'[preprocess_kdd] Total → -200       : {total_missing} sel '
+          f'({total_missing / (N * K) * 100:.2f}%)')
     data[np.isnan(data)] = -200
 
-    # Z-score normalisasi dari observed values saja
+    # ── Step 4: Z-score normalisasi ──────────────────────────────────────────
     means, stds = [], []
     for j in range(K):
         obs = data[data[:, j] != -200, j]
@@ -59,6 +85,7 @@ def preprocess_kdd(raw='Data/KDD.csv', out='Data/KDD_norm.csv'):
         data[data[:, j] != -200, j] = (data[data[:, j] != -200, j] - m) / s
         means.append(m); stds.append(s)
 
+    # ── Step 5: Simpan ───────────────────────────────────────────────────────
     np.savetxt(out, data, delimiter=',', fmt='%6f')
     np.save('Data/KDD_means.npy', np.array(means))
     np.save('Data/KDD_stds.npy',  np.array(stds))
@@ -307,104 +334,138 @@ def get_num_cols(dataset: str) -> list:
     path = csv_map.get(dataset, '')
     if path and os.path.exists(path):
         df = pd.read_csv(path, header=0, nrows=0)   # baca header saja
-        return df.select_dtypes(include=[np.number]).columns.tolist()
+        # exclude='object' lebih robust dari include=[np.number] di pandas 2.x/3.x
+        return df.select_dtypes(exclude=['object']).columns.tolist()
     return []   # fallback: tanpa header (pakai index numerik)
 
-def reconstruct_full_csv(configs):
+def full_inference_and_save(configs, model):
     """
-    Rekonstruksi output CSV final: 8035 baris × 117 kolom (numerik + kategorik).
+    Jalankan HWD inference pada SELURUH data (train + test, semua 8016 baris).
+    Setiap posisi -200 (natural missing + artificial missing) diisi dengan
+    prediksi HWD — tidak ada mean fallback.
 
-    Dipanggil setelah diffusion_test(). Menggabungkan:
-      - Kolom kategorik asli (stationId, utc_time, dll)
-      - Kolom numerik hasil imputasi (dari test CSV)
-      - Baris training yang tidak diimputasi (nilai asli)
-
-    Output: Data/{dataset.upper()}_HWD_full_mr{rate}.csv
+    Output: Data/{DATASET}_HWD_full_mr{rate}.csv
+      - Semua baris (8016) × semua kolom (numerik + kategorik)
+      - Tidak ada NaN di kolom numerik
+      - 1 kolom audit: _is_test (1=test rows, 0=train rows)
     """
-    import pandas as pd
+    import os
 
     dataset  = configs.dataset
     rate     = configs.missing_rate
-    imp_csv  = (f"HWD_Imputation_{dataset}_mr{rate}_original.csv")
+    seq_len  = configs.seq_len
 
-    # Map dataset ke file CSV mentah
+    # ── Map dataset ke raw CSV (untuk ambil kategorik + nama kolom) ──────────
     raw_map = {
         'kdd'      : 'Data/KDD.csv',
         'guangzhou': 'Data/guangzhou.csv',
-        'physio'   : 'Data/physio.csv',
+        'physio'   : 'Data/Physio_norm.csv',
         'imk'      : getattr(configs, 'col_names_path', ''),
     }
-    raw_csv = raw_map.get(dataset, '')
-
-    if not os.path.exists(imp_csv):
-        print(f"[reconstruct] {imp_csv} tidak ada — skip"); return
-    if not raw_csv or not os.path.exists(raw_csv):
-        print(f"[reconstruct] Raw CSV tidak ditemukan — skip"); return
-
-    # Load
-    df_raw = pd.read_csv(raw_csv)
-    df_imp = pd.read_csv(imp_csv)          # test set, skala asli, dengan header
-
-    num_cols = df_raw.select_dtypes(include=[np.number]).columns.tolist()
-    cat_cols = [c for c in df_raw.columns if c not in num_cols]
-
-    # Hitung split: berapa baris test set
-    seq_len   = configs.seq_len
-    n_rows    = len(df_raw)
-    n_windows = n_rows // seq_len
-    n_train_w = round(n_windows * 0.7)
-    n_test_w  = n_windows - n_train_w
-    n_train_r = n_train_w * seq_len       # baris train
-    n_test_r  = n_test_w  * seq_len       # baris test  = len(df_imp)
-
-    # Ambil nilai numerik yang sudah denorm dari preprocessing (untuk baris train)
+    norm_map = {
+        'kdd'      : 'Data/KDD_norm.csv',
+        'guangzhou': 'Data/Guangzhou_norm.csv',
+        'physio'   : 'Data/Physio_norm.csv',
+        'imk'      : 'Data/IMK_norm.csv',
+    }
+    raw_csv  = raw_map.get(dataset, '')
+    norm_csv = norm_map.get(dataset, '')
     means_path = f'Data/{dataset.upper()}_means.npy'
     stds_path  = f'Data/{dataset.upper()}_stds.npy'
-    if os.path.exists(means_path):
-        means = np.load(means_path)
-        stds  = np.load(stds_path)
-        norm_csv = f'Data/{dataset.upper()}_norm.csv'
-        data_norm = np.loadtxt(norm_csv, delimiter=',')
-        data_orig = data_norm * stds + means
-        data_orig[data_norm == -200] = np.nan    # restore NaN
+
+    if not os.path.exists(norm_csv):
+        print(f"[full_inference] {norm_csv} tidak ada — skip"); return
+    if not os.path.exists(means_path):
+        print(f"[full_inference] {means_path} tidak ada — skip"); return
+
+    # ── Load data norm dan means/stds ────────────────────────────────────────
+    data_norm  = np.loadtxt(norm_csv, delimiter=',')   # [N, K]
+    means      = np.load(means_path)
+    stds       = np.load(stds_path)
+    N, K       = data_norm.shape
+    n_windows  = N // seq_len
+    n_used     = n_windows * seq_len                   # baris yang masuk window
+
+    # Posisi yang perlu diimputasi: semua yang -200
+    mask_missing = (data_norm == -200)                 # [N, K] bool
+
+    # ── Jalankan inference di setiap window (train + test) ───────────────────
+    model.eval()
+    data_w    = data_norm[:n_used].reshape(n_windows, seq_len, K)   # [W, L, K]
+    miss_w    = mask_missing[:n_used].reshape(n_windows, seq_len, K)
+    obs_w     = (~miss_w).astype(np.float32)                         # 1=observed
+    result_w  = data_w.copy()                                        # akan diisi
+
+    batch_size = configs.batch * 2   # inference lebih cepat dari training
+    n_batches  = (n_windows + batch_size - 1) // batch_size
+
+    print(f"[full_inference] Running on all {n_windows} windows "
+          f"({n_batches} batches)...")
+
+    import torch
+    with torch.no_grad():
+        for b in range(n_batches):
+            s = b * batch_size
+            e = min(s + batch_size, n_windows)
+
+            # [B, L, K] → [B, K, L] sesuai format model
+            bd = torch.tensor(data_w[s:e], dtype=torch.float32
+                              ).permute(0,2,1).to(configs.device)
+            bm = torch.tensor(obs_w[s:e],  dtype=torch.float32
+                              ).permute(0,2,1).to(configs.device)
+            bt = torch.arange(seq_len, dtype=torch.float32
+                              ).unsqueeze(0).expand(e-s, -1).to(configs.device)
+            bgt = bm.clone()
+
+            out = model.evaluate(bd, bm, bt, bgt, n_samples=configs.n_samples)
+            imp_samples = out[0]                      # [B, n_samples, K, L]
+            imp_med = imp_samples.median(dim=1).values  # [B, K, L]
+            imp_med = imp_med.permute(0,2,1).cpu().numpy()  # [B, L, K]
+
+            # Isi posisi missing dengan prediksi, observed tetap nilai asli
+            miss_b = miss_w[s:e]                      # [B, L, K]
+            result_w[s:e][miss_b] = imp_med[miss_b]
+
+            if (b+1) % 10 == 0 or b == n_batches-1:
+                print(f"  batch {b+1}/{n_batches} done")
+
+    # ── Flatten dan denormalisasi ─────────────────────────────────────────────
+    result_flat = result_w.reshape(n_used, K)          # [n_used, K]
+    result_orig = result_flat * stds + means            # skala asli
+
+    # ── Susun DataFrame numerik ───────────────────────────────────────────────
+    num_cols = get_num_cols(dataset)
+    if len(num_cols) == K:
+        df_num = pd.DataFrame(result_orig, columns=num_cols)
     else:
-        data_orig = df_raw[num_cols].values
+        df_num = pd.DataFrame(result_orig)
 
-    # Baris train: pakai nilai asli (dengan NaN di posisi natural missing)
-    train_num = data_orig[:n_train_r]
+    # ── Gabungkan dengan kategorik (jika raw CSV tersedia) ───────────────────
+    if raw_csv and os.path.exists(raw_csv):
+        df_raw  = pd.read_csv(raw_csv)
+        cat_cols = [c for c in df_raw.columns if c not in (num_cols or df_raw.select_dtypes(exclude=['object']).columns.tolist())]
+        df_cat  = df_raw[cat_cols].iloc[:n_used].reset_index(drop=True)
+        df_out  = pd.concat([df_cat, df_num.reset_index(drop=True)], axis=1)
+        # Susun kolom sesuai urutan asli
+        orig_order = [c for c in df_raw.columns if c in df_out.columns]
+        df_out = df_out[orig_order]
+    else:
+        df_out = df_num
 
-    # Baris test: pakai hasil imputasi HWD (sudah skala asli)
-    # df_imp bisa punya sedikit lebih banyak/sedikit baris karena rounding
-    test_imp_vals = df_imp[num_cols].values if set(num_cols).issubset(df_imp.columns)                     else df_imp.values
-    # Pastikan jumlah baris test cocok
-    test_imp_vals = test_imp_vals[:n_test_r]
+    # ── Kolom audit ───────────────────────────────────────────────────────────
+    n_train_w = round(n_windows * 0.7)
+    n_train_r = n_train_w * seq_len
+    df_out['_is_test'] = 0
+    df_out.loc[n_train_r:, '_is_test'] = 1
 
-    # Gabungkan train + test
-    full_num = np.vstack([train_num, test_imp_vals])   # [n_train_r + n_test_r, K]
-
-    # Buat DataFrame lengkap
-    df_num_full = pd.DataFrame(full_num, columns=num_cols)
-
-    # Gabungkan kembali dengan kategorik (ambil n_train_r + n_test_r baris)
-    n_used = n_train_r + n_test_r
-    df_cat = df_raw[cat_cols].iloc[:n_used].reset_index(drop=True)
-    df_num_full = df_num_full.reset_index(drop=True)
-
-    # Susun urutan kolom seperti asli
-    df_full = pd.concat([df_cat, df_num_full], axis=1)
-    df_full = df_full[[c for c in df_raw.columns if c in df_full.columns]]
-
-    # Kolom audit
-    df_full['_is_test']     = 0
-    df_full.loc[n_train_r:n_train_r + n_test_r - 1, '_is_test'] = 1
-
+    # ── Simpan ────────────────────────────────────────────────────────────────
     out_path = f'Data/{dataset.upper()}_HWD_full_mr{rate}.csv'
-    df_full.to_csv(out_path, index=False)
-    print(f"[reconstruct] Full output: {out_path}  "
-          f"shape={df_full.shape}  "
-          f"(train={n_train_r}, test={n_test_r})")
-    return df_full
+    df_out.to_csv(out_path, index=False)
 
+    nan_left = df_out[df_out.columns.difference(['_is_test'])].isna().sum().sum()
+    print(f"[full_inference] Saved: {out_path}  "
+          f"shape={df_out.shape}  NaN={nan_left}")
+    return df_out
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Test / evaluasi
@@ -512,8 +573,8 @@ def diffusion_test(configs, model):
 
     print(f"  HWD  MAE={MAE:.4f}  RMSE={RMSE:.4f}  CRPS={CRPS:.4f}")
 
-    # Rekonstruksi output 8035 baris × semua kolom (termasuk kategorik)
-    reconstruct_full_csv(configs)
+    # Full inference: imputasi semua 8016 baris × semua kolom dengan HWD
+    full_inference_and_save(configs, model)
 
     return {"MAE": MAE.item(), "RMSE": RMSE.item(), "CRPS": CRPS}
 
