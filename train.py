@@ -411,19 +411,23 @@ def full_inference_and_save(configs, model):
             # [B, L, K] → [B, K, L] sesuai format model
             bd = torch.tensor(data_w[s:e], dtype=torch.float32
                               ).permute(0,2,1).to(configs.device)
-            bm = torch.tensor(obs_w[s:e],  dtype=torch.float32
+            bm = torch.tensor(obs_w[s:e], dtype=torch.float32
                               ).permute(0,2,1).to(configs.device)
-            bt = torch.arange(seq_len, dtype=torch.float32
-                              ).unsqueeze(0).expand(e-s, -1).to(configs.device)
-            bgt = bm.clone()
+            bt = torch.tensor(
+                np.tile(np.arange(seq_len, dtype=np.float32), (e-s, 1))
+            ).to(configs.device)   # [B, seq_len] — identik format DataLoader
 
-            out = model.evaluate(bd, bm, bt, bgt, n_samples=configs.n_samples)
-            imp_samples = out[0]                      # [B, n_samples, K, L]
-            imp_med = imp_samples.median(dim=1).values  # [B, K, L]
-            imp_med = imp_med.permute(0,2,1).cpu().numpy()  # [B, L, K]
+            # Dapatkan side_info dulu
+            side_info = model.get_side_info(bt, bm)
+
+            # impute: ambil n_samples prediksi, ambil median
+            samples = model.impute(bd, bm, side_info, n_samples=20)  # 20 cukup untuk output operasional
+            # samples shape: [B, n_samples, K, L]
+            imp_med = samples.median(dim=1).values   # [B, K, L]
+            imp_med = imp_med.permute(0, 2, 1).cpu().numpy()  # [B, L, K]
 
             # Isi posisi missing dengan prediksi, observed tetap nilai asli
-            miss_b = miss_w[s:e]                      # [B, L, K]
+            miss_b = miss_w[s:e]                     # [B, L, K] bool
             result_w[s:e][miss_b] = imp_med[miss_b]
 
             if (b+1) % 10 == 0 or b == n_batches-1:
