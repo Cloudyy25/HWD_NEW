@@ -32,159 +32,192 @@ import utils
 # Setelah file CSV ada, fungsi ini skip otomatis (ada guard os.path.exists).
 # ══════════════════════════════════════════════════════════════════════════════
 
-def preprocess_kdd(raw='Data/KDD.csv', out='Data/KDD_norm.csv'):
+def preprocess_data(dataset: str,
+                    raw:     str  = '',
+                    out:     str  = '',
+                    sentinel_val:    float = 999000.0,
+                    remove_sentinel: bool  = False,
+                    remove_outlier:  bool  = False):
+    # remove_sentinel=False, remove_outlier=False → benchmark mode (identik CSDI/FGTI)
+    # remove_sentinel=True,  remove_outlier=True  → operational mode
     """
-    Preprocessing KDD Cup 2018:
-      1. Sentinel ≥ 999000  → NaN   (kode sensor rusak di wind_direction)
-      2. Outlier  3×IQR     → NaN   (nilai ekstrem per kolom)
-      3. NaN                → -200  (missing marker untuk model)
-      4. Z-score normalisasi dari clean values
-      5. Simpan KDD_norm.csv, KDD_means.npy, KDD_stds.npy
+    Preprocessing universal untuk semua dataset.
+
+    Deteksi otomatis format data:
+      - Wide  : setiap kolom adalah satu sensor/variabel
+                (KDD, PhysioNet, IMK, data apapun yang sudah tabel)
+      - Long  : ada kolom ID unit + kolom nilai
+                (Guangzhou: road_id × timestep × speed)
+                Dikenali ketika jumlah kolom numerik ≤ 3 dan ada kolom
+                yang bisa jadi index waktu × index unit
+
+    Langkah yang sama untuk semua dataset:
+      1. Baca CSV → deteksi & pivot ke wide jika long format
+      2. Ambil kolom numerik saja (buang string/kategorik)
+      3. Sentinel value ≥ sentinel_val → NaN  (hanya KDD yang punya ini)
+      4. NaN → -200 (missing marker)
+      5. Z-score normalisasi dari observed values
+      6. Simpan _norm.csv, _means.npy, _stds.npy
+
+    Args:
+        dataset     : nama dataset ('kdd','guangzhou','physio','imk', dll)
+        raw         : path CSV mentah (auto jika kosong)
+        out         : path CSV output (auto jika kosong)
+        sentinel_val: threshold sentinel value (default 999000, hanya relevan KDD)
     """
+    # ── Auto-path jika tidak diisi ────────────────────────────────────────────
+    raw_defaults = {
+        'kdd'      : 'Data/KDD.csv',
+        'guangzhou': 'Data/guangzhou.csv',
+        'physio'   : 'Data/physio.csv',
+        'imk'      : 'Data/IMK_raw.csv',
+    }
+    out_defaults = {
+        'kdd'      : 'Data/KDD_norm.csv',
+        'guangzhou': 'Data/Guangzhou_norm.csv',
+        'physio'   : 'Data/Physio_norm.csv',
+        'imk'      : 'Data/IMK_norm.csv',
+    }
+    if not raw: raw = raw_defaults.get(dataset, f'Data/{dataset}.csv')
+    if not out: out = out_defaults.get(dataset, f'Data/{dataset}_norm.csv')
+
     if os.path.exists(out):
-        print(f'Skip — {out} sudah ada')
+        print(f'[preprocess] Skip — {out} sudah ada')
         return
 
-    df   = pd.read_csv(raw, header=0)
-    data = df.select_dtypes(include=[np.number]).to_numpy().astype(float)
+    # ── Baca CSV ──────────────────────────────────────────────────────────────
+    df = pd.read_csv(raw, header=0)
+    print(f'[preprocess] {dataset}: raw shape = {df.shape}')
+
+    # ── Deteksi & pivot long → wide ───────────────────────────────────────────
+    # Kriteria long format: kolom numerik ≤ 2 (selain ID dan waktu)
+    # dengan satu kolom yang punya banyak repeated integer (unit ID)
+    num_cols = df.select_dtypes(exclude=['object']).columns.tolist()
+    cat_cols = df.select_dtypes(include=['object']).columns.tolist()
+
+    is_long = False
+    if len(num_cols) <= 4 and len(num_cols) >= 2:
+        # Cek apakah ada kolom integer yang bisa jadi unit ID (kardinalitas < 5% N)
+        for col in num_cols:
+            if df[col].nunique() < len(df) * 0.05 and df[col].nunique() > 1:
+                # Kandidat kolom unit ID — kemungkinan long format
+                is_long = True
+                break
+
+    if is_long:
+        print(f'[preprocess] Terdeteksi format LONG — pivot ke wide')
+        # Strategi pivot: kolom dengan kardinalitas paling kecil = unit ID (jadi header)
+        #                 kolom berikutnya yang paling unik = timestep index
+        #                 kolom float = nilai
+        int_cols = [c for c in num_cols if pd.api.types.is_integer_dtype(df[c])]
+        float_cols = [c for c in num_cols if pd.api.types.is_float_dtype(df[c])]
+
+        # Urutkan int_cols berdasarkan kardinalitas
+        int_cols_sorted = sorted(int_cols, key=lambda c: df[c].nunique(), reverse=True)
+        # Yang kardinalitas TERBESAR = unit/sensor ID (jadi kolom di wide)
+        # karena setiap sensor menjadi satu kolom pada format wide
+        # Sisanya jadi composite index waktu
+        unit_col  = int_cols_sorted[0]
+        time_cols = int_cols_sorted[1:]
+        val_col   = float_cols[0] if float_cols else num_cols[-1]
+
+        print(f'  unit_col={unit_col} ({df[unit_col].nunique()} unique)')
+        print(f'  time_cols={time_cols}')
+        print(f'  val_col={val_col}')
+
+        # Buat index waktu flat
+        if len(time_cols) == 1:
+            df['_t'] = df[time_cols[0]]
+        else:
+            # Sort time_cols: kasar (sedikit unique) dulu, halus (banyak unique) terakhir
+            # Contoh: day_id (61) lebih kasar dari time_id (144)
+            time_cols = sorted(time_cols, key=lambda c: df[c].nunique())
+            n_fine = df[time_cols[-1]].nunique()
+            df['_t'] = (df[time_cols[0]] - 1) * n_fine + df[time_cols[-1]]
+
+        df_wide = df.pivot_table(index='_t', columns=unit_col, values=val_col)
+        df_wide = df_wide.sort_index()
+        data = df_wide.to_numpy().astype(float)
+        print(f'[preprocess] Shape setelah pivot: {data.shape}')
+    else:
+        print(f'[preprocess] Terdeteksi format WIDE')
+        # Ambil kolom numerik saja
+        data = df.select_dtypes(exclude=['object']).to_numpy().astype(float)
+        print(f'[preprocess] Shape numerik: {data.shape}')
+
     N, K = data.shape
 
-    # ── Step 1: Sentinel → NaN ───────────────────────────────────────────────
-    n_sent = (data >= 999000).sum()
-    data[data >= 999000] = np.nan
-    print(f'[preprocess_kdd] Sentinel ≥999000 → NaN : {n_sent} sel')
+    # ── Sentinel value → NaN (hanya jika remove_sentinel=True) ─────────────
+    # Benchmark mode (default): sentinel dibiarkan agar identik dengan CSDI/FGTI
+    # Operational mode: sentinel dihapus sebelum normalisasi
+    if remove_sentinel:
+        n_sent = (data >= sentinel_val).sum()
+        if n_sent > 0:
+            print(f'[preprocess] Sentinel ≥{sentinel_val:.0f} → NaN: {n_sent:,} sel')
+            data[data >= sentinel_val] = np.nan
+    else:
+        n_sent = (data >= sentinel_val).sum()
+        if n_sent > 0:
+            print(f'[preprocess] Sentinel ≥{sentinel_val:.0f} dibiarkan (benchmark mode): {n_sent:,} sel')
 
-    # ── Step 2: Outlier 3×IQR → NaN ─────────────────────────────────────────
-    n_out = 0
-    for j in range(K):
-        col   = data[:, j]
-        valid = col[~np.isnan(col)]
-        if len(valid) < 10:
-            continue
-        q1, q3 = np.percentile(valid, 25), np.percentile(valid, 75)
-        iqr    = q3 - q1
-        lo, hi = q1 - 3.0 * iqr, q3 + 3.0 * iqr
-        mask_out = (~np.isnan(col)) & ((col < lo) | (col > hi))
-        n_out   += mask_out.sum()
-        data[mask_out, j] = np.nan
-    print(f'[preprocess_kdd] Outlier 3×IQR     → NaN : {n_out} sel')
+    # ── Outlier removal 3×IQR → NaN (hanya jika remove_outlier=True) ──────────
+    # Benchmark mode (default): outlier dibiarkan — identik dengan CSDI/FGTI
+    # Operational mode: outlier ekstrem dikonversi ke missing sebelum normalisasi
+    if remove_outlier:
+        n_out = 0
+        for j in range(K):
+            col = data[:, j]
+            valid = col[~np.isnan(col)]
+            if len(valid) < 10:
+                continue
+            q1, q3 = np.percentile(valid, 25), np.percentile(valid, 75)
+            iqr = q3 - q1
+            lo, hi = q1 - 3.0 * iqr, q3 + 3.0 * iqr
+            mask_out = (~np.isnan(col)) & ((col < lo) | (col > hi))
+            n_out += mask_out.sum()
+            data[mask_out, j] = np.nan
+        print(f'[preprocess] Outlier 3×IQR → NaN: {n_out:,} sel')
 
-    # ── Step 3: NaN → -200 ───────────────────────────────────────────────────
-    total_missing = np.isnan(data).sum()
-    print(f'[preprocess_kdd] Total → -200       : {total_missing} sel '
-          f'({total_missing / (N * K) * 100:.2f}%)')
+    # ── NaN → -200 ────────────────────────────────────────────────────────────
+    n_nan = np.isnan(data).sum()
+    print(f'[preprocess] NaN → -200: {n_nan:,} sel ({n_nan/(N*K)*100:.2f}%)')
     data[np.isnan(data)] = -200
 
-    # ── Step 4: Z-score normalisasi ──────────────────────────────────────────
+    # ── Z-score normalisasi ───────────────────────────────────────────────────
+    # Guangzhou: normalisasi GLOBAL (satu mean/std untuk semua kolom)
+    #            karena semua kolom = kecepatan lalu lintas, satuan sama
+    # Dataset lain: normalisasi PER KOLOM (satuan berbeda antar variabel)
+    GLOBAL_NORM_DATASETS = {'guangzhou'}
     means, stds = [], []
-    for j in range(K):
-        obs = data[data[:, j] != -200, j]
-        if len(obs) == 0:
-            means.append(0); stds.append(1); continue
-        m, s = obs.mean(), obs.std() + 1e-8
-        data[data[:, j] != -200, j] = (data[data[:, j] != -200, j] - m) / s
-        means.append(m); stds.append(s)
 
-    # ── Step 5: Simpan ───────────────────────────────────────────────────────
+    if dataset in GLOBAL_NORM_DATASETS:
+        # Global normalization — identik dengan FGTI untuk Guangzhou
+        obs_all = data[data != -200]
+        m_global = obs_all.mean()
+        s_global = obs_all.std() + 1e-8
+        data[data != -200] = (data[data != -200] - m_global) / s_global
+        # Simpan sebagai list panjang K agar denormalisasi tetap konsisten
+        means = [m_global] * K
+        stds  = [s_global] * K
+        print(f'[preprocess] Normalisasi global: mean={m_global:.4f}, std={s_global:.4f}')
+    else:
+        # Per-column normalization — identik dengan FGTI untuk KDD, PhysioNet, IMK
+        for j in range(K):
+            obs = data[data[:, j] != -200, j]
+            if len(obs) == 0:
+                means.append(0.0); stds.append(1.0); continue
+            m, s = obs.mean(), obs.std() + 1e-8
+            data[data[:, j] != -200, j] = (data[data[:, j] != -200, j] - m) / s
+            means.append(m); stds.append(s)
+
+    # ── Simpan ────────────────────────────────────────────────────────────────
+    data_dir = os.path.dirname(out) or 'Data'
+    prefix   = os.path.basename(out).replace('_norm.csv', '')
     np.savetxt(out, data, delimiter=',', fmt='%6f')
-    np.save('Data/KDD_means.npy', np.array(means))
-    np.save('Data/KDD_stds.npy',  np.array(stds))
-    print(f'[preprocess_kdd] Saved: {out}  shape={data.shape}')
+    np.save(os.path.join(data_dir, f'{prefix}_means.npy'), np.array(means))
+    np.save(os.path.join(data_dir, f'{prefix}_stds.npy'),  np.array(stds))
+    print(f'[preprocess] Saved: {out}  shape={data.shape}')
 
-
-def preprocess_imk(raw='Data/IMK_raw.csv', out='Data/IMK_norm.csv'):
-    """
-    Preprocessing IMK BPS:
-      1. Outlier 3×IQR → NaN  (tidak ada sentinel khusus seperti KDD)
-         Lower bound di-clamp ke 0 untuk variabel non-negatif (nilai ekonomi)
-      2. NaN            → -200
-      3. Z-score normalisasi
-      4. Simpan IMK_norm.csv, IMK_means.npy, IMK_stds.npy
-    """
-    if os.path.exists(out):
-        print(f'Skip — {out} sudah ada')
-        return
-
-    df   = pd.read_csv(raw, header=0)
-    data = df.select_dtypes(include=[np.number]).to_numpy().astype(float)
-    N, K = data.shape
-
-    # ── Step 1: Outlier 3×IQR → NaN ─────────────────────────────────────────
-    n_out = 0
-    for j in range(K):
-        col   = data[:, j]
-        valid = col[~np.isnan(col)]
-        if len(valid) < 10:
-            continue
-        q1, q3 = np.percentile(valid, 25), np.percentile(valid, 75)
-        iqr    = q3 - q1
-        lo, hi = q1 - 3.0 * iqr, q3 + 3.0 * iqr
-        if q1 >= 0:           # variabel non-negatif: lower fence min 0
-            lo = max(lo, 0)
-        mask_out = (~np.isnan(col)) & ((col < lo) | (col > hi))
-        n_out   += mask_out.sum()
-        data[mask_out, j] = np.nan
-    print(f'[preprocess_imk] Outlier 3×IQR     → NaN : {n_out} sel')
-
-    # ── Step 2: NaN → -200 ───────────────────────────────────────────────────
-    total_missing = np.isnan(data).sum()
-    print(f'[preprocess_imk] Total → -200       : {total_missing} sel '
-          f'({total_missing / (N * K) * 100:.2f}%)')
-    data[np.isnan(data)] = -200
-
-    # ── Step 3: Z-score normalisasi ──────────────────────────────────────────
-    means, stds = [], []
-    for j in range(K):
-        obs = data[data[:, j] != -200, j]
-        if len(obs) == 0:
-            means.append(0); stds.append(1); continue
-        m, s = obs.mean(), obs.std() + 1e-8
-        data[data[:, j] != -200, j] = (data[data[:, j] != -200, j] - m) / s
-        means.append(m); stds.append(s)
-
-    # ── Step 4: Simpan ───────────────────────────────────────────────────────
-    np.savetxt(out, data, delimiter=',', fmt='%6f')
-    np.save('Data/IMK_means.npy', np.array(means))
-    np.save('Data/IMK_stds.npy',  np.array(stds))
-    print(f'[preprocess_imk] Saved: {out}  shape={data.shape}')
-
-
-def preprocess_generic(raw_csv: str, out_csv: str, prefix: str = 'Data'):
-    """
-    Preprocessing generik untuk dataset selain KDD dan IMK:
-    hanya NaN → -200 dan z-score. Tidak ada sentinel atau outlier treatment
-    karena Guangzhou dan PhysioNet tidak punya sentinel value seperti KDD.
-    """
-    if os.path.exists(out_csv):
-        print(f'Skip — {out_csv} sudah ada')
-        return
-
-    df   = pd.read_csv(raw_csv, header=0)
-    data = df.select_dtypes(include=[np.number]).to_numpy().astype(float)
-    N, K = data.shape
-
-    data[np.isnan(data)] = -200
-
-    means, stds = [], []
-    for j in range(K):
-        obs = data[data[:, j] != -200, j]
-        if len(obs) == 0:
-            means.append(0); stds.append(1); continue
-        m, s = obs.mean(), obs.std() + 1e-8
-        data[data[:, j] != -200, j] = (data[data[:, j] != -200, j] - m) / s
-        means.append(m); stds.append(s)
-
-    np.savetxt(out_csv, data, delimiter=',', fmt='%6f')
-    data_dir = os.path.dirname(out_csv) or 'Data'
-    np.save(f'{data_dir}/{prefix}_means.npy', np.array(means))
-    np.save(f'{data_dir}/{prefix}_stds.npy',  np.array(stds))
-    print(f'[preprocess_generic] Saved: {out_csv}  shape={data.shape}')
-
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# get_config — bisa dipanggil dari Colab (override=dict) atau CLI (override=None)
-# ══════════════════════════════════════════════════════════════════════════════
 
 def get_config(override: dict = None):
     """

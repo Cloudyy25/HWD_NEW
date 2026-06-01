@@ -117,91 +117,101 @@ def generate_mcar(data: np.ndarray, missing_rate: float,
 # ─────────────────────────────────────────────────────────
 # MAR — identik logika FGTI
 # ─────────────────────────────────────────────────────────
+
+def _efraimidis(flat_prob: np.ndarray, size: int) -> np.ndarray:
+    """
+    Weighted sampling tanpa pengembalian pada flat index menggunakan
+    Efraimidis-Spirakis (2006): key = -log(U) / p, ambil top-size terkecil.
+    Kompleksitas O(N) memori + O(N log size) waktu via argpartition.
+    Menggunakan float32 untuk efisiensi memori.
+    """
+    u    = np.random.uniform(size=len(flat_prob)).astype(np.float32)
+    keys = -np.log(u) / (flat_prob.astype(np.float32) + np.float32(1e-10))
+    return np.argpartition(keys, size)[:size]
+
+
 def generate_mar(data: np.ndarray, missing_rate: float,
                  seed: int, mar_col: int = 0,
                  valid_mask: np.ndarray = None) -> np.ndarray:
     """
-    Missing At Random.
-    Probabilitas missing bergantung pada rank kolom mar_col
-    (temperature / variabel eksternal).
+    Missing At Random (MAR).
+    P(missing | row i, col j) ∝ rank(row i berdasarkan mar_col).
+    Kolom dipilih secara uniform sehingga:
+        P(i, j) = (1/K) × prob_i
+    Implementasi: flat-index Efraimidis tanpa argwhere (hemat memori).
     """
-    random.seed(seed)
     np.random.seed(seed)
 
-    base          = get_base_mask(data)
+    base = get_base_mask(data)
     if valid_mask is not None:
-        base      = base * valid_mask.astype(np.int32)
+        base = base * valid_mask.astype(np.int32)
 
-    mask_target   = base.copy()
-    target_count  = int(np.sum(base) * missing_rate)
+    N, K = data.shape
+    target_count = int(np.sum(base) * missing_rate)
 
-    n_rows        = data.shape[0]
-    attr_data     = data[:, mar_col]
-    # Ganti -200/NaN dengan min agar tidak bias sort
-    attr_clean    = attr_data.copy()
-    attr_clean[attr_clean == -200] = np.nanmin(attr_clean[attr_clean != -200])
-    attr_clean    = np.nan_to_num(attr_clean, nan=np.nanmin(attr_clean))
+    # Hitung probabilitas baris berdasarkan mar_col
+    attr = data[:, mar_col].copy().astype(np.float64)
+    attr[attr == -200] = np.nanmin(attr[attr != -200]) if (attr != -200).any() else 0.0
+    attr = np.nan_to_num(attr, nan=float(np.nanmin(attr)) if not np.all(np.isnan(attr)) else 0.0)
+    rank = (np.argsort(np.argsort(attr)) + 1).astype(np.float32)
+    row_prob = rank / rank.sum()   # [N]
 
-    index         = np.argsort(attr_clean)
-    rank          = np.argsort(index) + 1
-    prob          = rank / rank.sum()
+    # Flat prob: posisi (i,j) → index i*K+j, prob = row_prob[i] / K
+    # (kolom uniform, baris berdasarkan MAR rank)
+    flat_prob = np.repeat(row_prob, K) / K  # [N*K]
 
-    missing_count = 0
-    while missing_count < target_count:
-        col = random.randint(0, data.shape[1] - 1)
-        row = np.random.choice(n_rows, p=prob)
-        if mask_target[row, col] == 0:
-            continue
-        mask_target[row, col] = 0
-        missing_count += 1
+    # Nol-kan posisi yang tidak valid (base==0)
+    flat_prob *= base.flatten().astype(np.float32)
+    flat_prob /= flat_prob.sum()  # renormalisasi
 
-    return mask_target
+    # Sample target_count posisi
+    chosen_flat = _efraimidis(flat_prob, target_count)
+    mask = base.copy()
+    mask.flat[chosen_flat] = 0
+    return mask
 
 
-# ─────────────────────────────────────────────────────────
-# MNAR — identik logika FGTI
-# ─────────────────────────────────────────────────────────
 def generate_mnar(data: np.ndarray, missing_rate: float,
                   seed: int, valid_mask: np.ndarray = None) -> np.ndarray:
     """
-    Missing Not At Random.
-    Probabilitas missing bergantung pada nilai kolom itu sendiri —
-    nilai yang lebih tinggi lebih mungkin hilang.
+    Missing Not At Random (MNAR).
+    P(missing | row i, col j) ∝ rank(nilai data[i,j] dalam kolom j).
+    Nilai besar lebih mungkin hilang.
+    Implementasi: flat-index Efraimidis tanpa argwhere (hemat memori).
     """
-    random.seed(seed)
     np.random.seed(seed)
 
-    base          = get_base_mask(data)
+    base = get_base_mask(data)
     if valid_mask is not None:
-        base      = base * valid_mask.astype(np.int32)
+        base = base * valid_mask.astype(np.int32)
 
-    mask_target   = base.copy()
-    target_count  = int(np.sum(base) * missing_rate)
-    n_rows        = data.shape[0]
+    N, K = data.shape
+    target_count = int(np.sum(base) * missing_rate)
 
-    missing_count = 0
-    while missing_count < target_count:
-        col        = random.randint(0, data.shape[1] - 1)
-        col_data   = data[:, col].copy()
-        col_data[col_data == -200] = np.nanmin(col_data[col_data != -200])
-        col_data   = np.nan_to_num(col_data, nan=np.nanmin(col_data))
+    # Hitung col_probs [N, K]: prob tiap posisi berdasarkan rank dalam kolomnya
+    col_probs = np.zeros((N, K), dtype=np.float32)
+    for c in range(K):
+        col_data = data[:, c].copy().astype(np.float64)
+        valid = col_data != -200
+        min_val = float(col_data[valid].min()) if valid.any() else 0.0
+        col_data[~valid] = min_val
+        col_data = np.nan_to_num(col_data, nan=min_val)
+        rank = (np.argsort(np.argsort(col_data)) + 1).astype(np.float32)
+        col_probs[:, c] = rank / rank.sum()
 
-        index      = np.argsort(col_data)
-        rank       = np.argsort(index) + 1
-        prob       = rank / rank.sum()
+    # Flat prob: (i,j) → i*K+j, prob = col_probs[i,j] / K
+    flat_prob = col_probs.flatten() / K
 
-        row        = np.random.choice(n_rows, p=prob)
-        if mask_target[row, col] == 0:
-            continue
-        mask_target[row, col] = 0
-        missing_count += 1
+    # Nol-kan posisi tidak valid
+    flat_prob *= base.flatten().astype(np.float32)
+    flat_prob /= flat_prob.sum()
 
-    return mask_target
+    chosen_flat = _efraimidis(flat_prob, target_count)
+    mask = base.copy()
+    mask.flat[chosen_flat] = 0
+    return mask
 
 
-# ─────────────────────────────────────────────────────────
-# BLOCK — khusus untuk late response IMK (baru, tidak ada di FGTI)
-# ─────────────────────────────────────────────────────────
 def generate_block(data: np.ndarray, missing_rate: float,
                    seed: int, block_size: int = 2,
                    valid_mask: np.ndarray = None) -> np.ndarray:
@@ -231,19 +241,28 @@ def generate_block(data: np.ndarray, missing_rate: float,
     target_count  = int(total_obs * missing_rate)
     missing_count = 0
 
-    # Pilih baris start secara acak, lalu block_size baris ke bawah
-    tries = 0
-    while missing_count < target_count and tries < target_count * 10:
-        tries  += 1
-        row_start = random.randint(0, max(0, n_rows - block_size))
-        col       = random.randint(0, n_cols - 1)
+    # Vectorized: pre-generate semua kandidat blok sekaligus
+    # Estimasi jumlah blok yang dibutuhkan (setiap blok isi block_size posisi)
+    n_blocks_needed = (target_count // block_size) + 1
+    # Oversample 3x untuk antisipasi collision/overlap
+    n_candidates    = n_blocks_needed * 3
 
-        # Cek apakah ada yang bisa di-missing di blok ini
-        block_slice = mask_target[row_start: row_start + block_size, col]
-        if block_slice.sum() == 0:
+    row_starts = np.random.randint(0, max(1, n_rows - block_size + 1),
+                                   size=n_candidates)
+    cols       = np.random.randint(0, n_cols, size=n_candidates)
+
+    for i in range(n_candidates):
+        if missing_count >= target_count:
+            break
+        r0  = row_starts[i]
+        col = cols[i]
+        r1  = min(r0 + block_size, n_rows)
+        # Hanya proses kalau ada posisi valid di blok ini
+        if mask_target[r0:r1, col].sum() == 0:
             continue
-
-        for r in range(row_start, min(row_start + block_size, n_rows)):
+        for r in range(r0, r1):
+            if missing_count >= target_count:
+                break
             if mask_target[r, col] == 1:
                 mask_target[r, col] = 0
                 missing_count += 1
