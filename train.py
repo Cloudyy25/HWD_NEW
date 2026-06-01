@@ -287,7 +287,28 @@ def diffusion_train(configs):
         model_optim, milestones=[p1, p2], gamma=0.1
     )
 
-    for epoch in range(configs.epoch_diff):
+    # ── Definisi path checkpoint ─────────────────────────────────────────────
+    os.makedirs(configs.save_dir, exist_ok=True)
+    ckpt_path = os.path.join(
+        configs.save_dir,
+        f"hwd_{configs.dataset}_mr{configs.missing_rate}.pt"
+    )
+
+    # ── Resume dari checkpoint jika ada ─────────────────────────────────────
+    start_epoch = 0
+    if os.path.exists(ckpt_path):
+        model.load_state_dict(torch.load(ckpt_path, map_location=configs.device))
+        meta_path = ckpt_path.replace('.pt', '_meta.txt')
+        if os.path.exists(meta_path):
+            with open(meta_path) as mf:
+                start_epoch = int(mf.read().strip())
+        if start_epoch < configs.epoch_diff:
+            print(f"Resume dari epoch {start_epoch} → target {configs.epoch_diff}")
+        else:
+            print(f"Checkpoint sudah epoch {start_epoch} >= target {configs.epoch_diff} — skip training")
+            return model
+
+    for epoch in range(start_epoch, configs.epoch_diff):
         train_loss = []
         epoch_time = time.time()
 
@@ -306,13 +327,11 @@ def diffusion_train(configs):
                   f"| loss {np.average(train_loss):.6f}")
 
     # Simpan checkpoint
-    os.makedirs(configs.save_dir, exist_ok=True)
-    ckpt_path = os.path.join(
-        configs.save_dir,
-        f"hwd_{configs.dataset}_mr{configs.missing_rate}.pt"
-    )
     torch.save(model.state_dict(), ckpt_path)
-    print(f"Checkpoint saved: {ckpt_path}")
+    meta_path = ckpt_path.replace('.pt', '_meta.txt')
+    with open(meta_path, 'w') as mf:
+        mf.write(str(configs.epoch_diff))
+    print(f"Checkpoint saved: {ckpt_path} (epoch {configs.epoch_diff})")
 
     return model
 
@@ -577,10 +596,8 @@ def diffusion_test(configs, model):
 
     print(f"  HWD  MAE={MAE:.4f}  RMSE={RMSE:.4f}  CRPS={CRPS:.4f}")
 
-    # Full inference: imputasi semua 8016 baris × semua kolom dengan HWD
-    full_inference_and_save(configs, model)
-
-    return {"MAE": MAE.item(), "RMSE": RMSE.item(), "CRPS": CRPS}
+    # Full inference dipanggil terpisah setelah semua testing selesai
+    return {"MAE": MAE.item(), "RMSE": RMSE.item(), "CRPS": CRPS, "_model": model}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -600,6 +617,101 @@ def calc_MAE(target, forecast, eval_points):
 # ══════════════════════════════════════════════════════════════════════════════
 # Entry point CLI
 # ══════════════════════════════════════════════════════════════════════════════
+
+
+def run_all(configs_base, missing_rates=None, run_full_inf=True):
+    """
+    Jalankan semua rate secara berurutan:
+      1. Training  semua rate  (skip jika checkpoint sudah ada)
+      2. Testing   semua rate  (MAE/RMSE/CRPS)
+      3. Full inference semua rate  (opsional, setelah semua testing selesai)
+
+    Contoh dari notebook:
+        import train
+        cfg = train.get_config({'dataset': 'kdd', 'epoch_diff': 400, ...})
+        train.run_all(cfg, missing_rates=[0.1, 0.2, 0.3, 0.4])
+    """
+    import os
+    if missing_rates is None:
+        missing_rates = [0.1, 0.2, 0.3, 0.4]
+
+    trained_models = {}
+
+    # ── FASE 1: Training semua rate ────────────────────────────────────────
+    print("=" * 50)
+    print("FASE 1: Training")
+    print("=" * 50)
+    for rate in missing_rates:
+        import copy
+        cfg = copy.deepcopy(configs_base)
+        cfg.missing_rate = rate
+        print(f"\n{'='*45}\n  Missing rate : {rate}\n{'='*45}")
+        model = diffusion_train(cfg)
+        trained_models[rate] = model
+
+    # ── FASE 2: Testing semua rate ─────────────────────────────────────────
+    print("\n" + "=" * 50)
+    print("FASE 2: Testing (Evaluasi Metrik)")
+    print("=" * 50)
+    results = {}
+    for rate in missing_rates:
+        import copy
+        cfg = copy.deepcopy(configs_base)
+        cfg.missing_rate = rate
+        print(f"\n{'='*45}\n  Missing rate : {rate}\n{'='*45}")
+
+        # Kalau model tidak ada di memory (session restart), load dari checkpoint
+        if rate not in trained_models:
+            from models import main_model as mm
+            model = mm.HWD(cfg).to(cfg.device)
+            ckpt_path = os.path.join(
+                cfg.save_dir,
+                f"hwd_{cfg.dataset}_mr{rate}.pt"
+            )
+            if os.path.exists(ckpt_path):
+                model.load_state_dict(
+                    torch.load(ckpt_path, map_location=cfg.device)
+                )
+                print(f"  Loaded checkpoint: {ckpt_path}")
+            else:
+                print(f"  SKIP — checkpoint tidak ada: {ckpt_path}")
+                continue
+        else:
+            model = trained_models[rate]
+
+        res = diffusion_test(cfg, model)
+        results[rate] = res
+        results[rate]['_model'] = model
+
+    # ── FASE 3: Full inference semua rate (setelah semua testing selesai) ──
+    if run_full_inf:
+        print("\n" + "=" * 50)
+        print("FASE 3: Full Inference (Output Operasional)")
+        print("=" * 50)
+        for rate in missing_rates:
+            if rate not in results:
+                print(f"  mr={rate}: skip (tidak ada hasil testing)")
+                continue
+            import copy
+            cfg = copy.deepcopy(configs_base)
+            cfg.missing_rate = rate
+            model = results[rate]['_model']
+            print(f"\n  Full inference mr={rate}...")
+            full_inference_and_save(cfg, model)
+
+    # ── Ringkasan ──────────────────────────────────────────────────────────
+    print("\n" + "=" * 50)
+    print("RINGKASAN HASIL")
+    print("=" * 50)
+    print(f"  {'Rate':<8} {'MAE':<10} {'RMSE':<10} {'CRPS':<10}")
+    print(f"  {'-'*38}")
+    for rate in missing_rates:
+        if rate in results:
+            r = results[rate]
+            print(f"  {rate:<8} {r['MAE']:<10.4f} {r['RMSE']:<10.4f} {r['CRPS']:<10.4f}")
+
+    return results
+
 
 if __name__ == '__main__':
     configs = get_config()
