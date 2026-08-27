@@ -113,11 +113,24 @@ class PHYSIO_DATASET(Dataset):
         n_ok = (len(raw) // configs.seq_len) * configs.seq_len
         self.data = raw[:n_ok].reshape(-1, configs.seq_len, configs.enc_in)
 
-        # PhysioNet: tidak pakai mask eksperimen terpisah
-        # Mask = posisi yang memang observed secara natural
+        # ── Load mask eksperimen (identik KDD) ────────────────────────────────
+        if configs.missing_rate == 0:
+            self.mask = np.ones_like(self.data)
+            self.mask[self.data == -200] = 0
+        else:
+            mask_path = (f"Data/mask/physio/physio_{configs.missing_rate}"
+                         f"_{configs.seed}.csv")
+            if not os.path.exists(mask_path):
+                raise FileNotFoundError(
+                    f"Mask file tidak ditemukan: {mask_path}\n"
+                    f"Jalankan generate_missing.py terlebih dahulu."
+                )
+            mask_raw  = np.loadtxt(mask_path, delimiter=",")
+            self.mask = mask_raw[:n_ok].reshape(-1, configs.seq_len, configs.enc_in)
+
+        # ── Ground-truth mask: semua posisi yang bukan -200 ──────────────────
         self.mask_gt = np.ones_like(self.data)
         self.mask_gt[self.data == -200] = 0
-        self.mask = self.mask_gt.copy()
 
     def __len__(self):
         return self.data.shape[0]
