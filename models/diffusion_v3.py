@@ -108,38 +108,45 @@ class _SignalStat(nn.Module):
     def forward(self, x):
         # mask teramati: posisi bernilai tak-nol
         m = (x != 0).float()                          # [B,K,L]
-        cnt = m.sum(-1).clamp(min=1.0)                # jumlah teramati per baris
+        cnt = m.sum(-1).clamp(min=2.0)                # jumlah teramati per baris
 
-        # rerata & simpangan baku hanya pada nilai teramati
-        mu = (x * m).sum(-1) / cnt                    # [B,K]
-        mu_ = mu.unsqueeze(-1)
-        var = ((x - mu_) ** 2 * m).sum(-1) / cnt
-        sd = var.sqrt() + 1e-8
+        # Fitur statistik bersifat DESKRIPTOR input; tidak perlu gradien mengalir
+        # melalui operasi pangkat-4 yang berpotensi tidak stabil. Gating tetap
+        # dilatih melalui bobot MLP-nya. Karena itu fitur dihitung dalam no_grad
+        # dan diberi pengaman numerik (clamp) untuk mencegah ledakan nilai (nan).
+        with torch.no_grad():
+            # rerata & simpangan baku hanya pada nilai teramati
+            mu = (x * m).sum(-1) / cnt                    # [B,K]
+            mu_ = mu.unsqueeze(-1)
+            var = ((x - mu_) ** 2 * m).sum(-1) / cnt
+            sd = var.sqrt().clamp(min=1e-2)              # floor lebih besar utk stabilitas
 
-        # kurtosis termask (ekor berat -> transien)
-        z4 = (((x - mu_) / sd.unsqueeze(-1)) ** 4) * m
-        kurt = z4.sum(-1) / cnt                       # [B,K]
+            # kurtosis termask (ekor berat -> transien), dibatasi agar tidak meledak
+            z = ((x - mu_) / sd.unsqueeze(-1)).clamp(-10.0, 10.0)
+            kurt = ((z ** 4) * m).sum(-1) / cnt          # [B,K]
+            kurt = kurt.clamp(0.0, 100.0)
 
-        # konsentrasi energi termask (rasio energi puncak thd rerata)
-        e = (x ** 2) * m
-        emax = e.max(-1).values
-        emean = e.sum(-1) / cnt + 1e-8
-        conc = emax / emean                           # [B,K]
+            # konsentrasi energi termask (rasio energi puncak thd rerata)
+            e = (x ** 2) * m
+            emax = e.max(-1).values
+            emean = e.sum(-1) / cnt + 1e-6
+            conc = (emax / emean).clamp(0.0, 100.0)      # [B,K]
 
-        # rasio energi frekuensi tinggi.
-        # Untuk mencegah FFT menciptakan frekuensi-tinggi palsu di posisi missing,
-        # lubang diisi dengan interpolasi linear antar nilai teramati (vektorized,
-        # differentiable) sehingga tidak ada lompatan tajam ke nol. Ini membuat
-        # hf jauh lebih stabil terhadap perubahan tingkat missing.
-        x_fill = self._interp_fill(x, m, mu_)
-        x_fill = x_fill - x_fill.mean(-1, keepdim=True)
-        Xf = torch.fft.rfft(x_fill, dim=-1).abs()
-        Lf = Xf.shape[-1]
-        hi = Xf[..., Lf // 2:].pow(2).sum(-1)
-        tot = Xf.pow(2).sum(-1) + 1e-8
-        hf = hi / tot                                 # [B,K]
+            # rasio energi frekuensi tinggi (lubang diisi interpolasi linear)
+            x_fill = self._interp_fill(x, m, mu_)
+            x_fill = x_fill - x_fill.mean(-1, keepdim=True)
+            Xf = torch.fft.rfft(x_fill, dim=-1).abs()
+            Lf = Xf.shape[-1]
+            hi = Xf[..., Lf // 2:].pow(2).sum(-1)
+            tot = Xf.pow(2).sum(-1) + 1e-6
+            hf = (hi / tot).clamp(0.0, 1.0)              # [B,K]
 
-        return torch.stack([hf, kurt, conc], dim=-1)  # [B,K,3]
+            feat = torch.stack([hf, kurt, conc], dim=-1) # [B,K,3]
+            # normalisasi ringan agar skala fitur seimbang untuk MLP
+            feat = torch.nan_to_num(feat, nan=0.0, posinf=1.0, neginf=0.0)
+            feat = feat / feat.new_tensor([1.0, 100.0, 100.0])   # skala ~[0,1]
+
+        return feat  # [B,K,3] (detached)
 
     @staticmethod
     def _interp_fill(x, m, mu_):
