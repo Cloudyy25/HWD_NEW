@@ -97,94 +97,17 @@ def Conv1d_with_init(in_channels, out_channels, kernel_size):
 
 # ── Adaptive Dual-Domain Gating (v3) ────────────────────────────────
 class _SignalStat(nn.Module):
-    """
-    Fitur pembeda transien vs periodik dari [B,K,L].
-
-    PENTING (perbaikan v3.1): fitur dihitung hanya dari nilai TERAMATI
-    (masked statistics). Nilai 0 akibat missing TIDAK diikutkan agar fitur
-    mencerminkan karakter sinyal asli, bukan banyaknya nilai hilang.
-    Mask diturunkan dari posisi non-nol pada input (cond_obs = data × mask).
-    """
+    """Fitur pembeda transien vs periodik dari [B,K,L]."""
     def forward(self, x):
-        # mask teramati: posisi bernilai tak-nol
-        m = (x != 0).float()                          # [B,K,L]
-        cnt = m.sum(-1).clamp(min=1.0)                # jumlah teramati per baris
-
-        # rerata & simpangan baku hanya pada nilai teramati
-        mu = (x * m).sum(-1) / cnt                    # [B,K]
-        mu_ = mu.unsqueeze(-1)
-        var = ((x - mu_) ** 2 * m).sum(-1) / cnt
-        sd = var.sqrt() + 1e-8
-
-        # kurtosis termask (ekor berat -> transien)
-        z4 = (((x - mu_) / sd.unsqueeze(-1)) ** 4) * m
-        kurt = z4.sum(-1) / cnt                       # [B,K]
-
-        # konsentrasi energi termask (rasio energi puncak thd rerata)
-        e = (x ** 2) * m
-        emax = e.max(-1).values
-        emean = e.sum(-1) / cnt + 1e-8
-        conc = emax / emean                           # [B,K]
-
-        # rasio energi frekuensi tinggi.
-        # Untuk mencegah FFT menciptakan frekuensi-tinggi palsu di posisi missing,
-        # lubang diisi dengan interpolasi linear antar nilai teramati (vektorized,
-        # differentiable) sehingga tidak ada lompatan tajam ke nol. Ini membuat
-        # hf jauh lebih stabil terhadap perubahan tingkat missing.
-        x_fill = self._interp_fill(x, m, mu_)
-        x_fill = x_fill - x_fill.mean(-1, keepdim=True)
-        Xf = torch.fft.rfft(x_fill, dim=-1).abs()
+        Xf = torch.fft.rfft(x, dim=-1).abs()
         Lf = Xf.shape[-1]
         hi = Xf[..., Lf // 2:].pow(2).sum(-1)
         tot = Xf.pow(2).sum(-1) + 1e-8
-        hf = hi / tot                                 # [B,K]
-
-        return torch.stack([hf, kurt, conc], dim=-1)  # [B,K,3]
-
-    @staticmethod
-    def _interp_fill(x, m, mu_):
-        """
-        Isi posisi missing (m==0) dengan interpolasi linear dari nilai teramati.
-        Vektorized & differentiable. x,m:[B,K,L]. Fallback ke mean bila terlalu
-        sedikit titik teramati.
-        """
-        B, K, L = x.shape
-        dev = x.device
-        idx = torch.arange(L, device=dev).view(1, 1, L).float()
-
-        # posisi teramati; untuk tiap titik cari tetangga teramati kiri & kanan
-        big = 1e9
-        obs_pos = torch.where(m > 0, idx, torch.full_like(idx, big))     # utk cari kanan (min>=t)
-        obs_pos_l = torch.where(m > 0, idx, torch.full_like(idx, -big))  # utk cari kiri (max<=t)
-
-        # broadcast: untuk tiap t, cari indeks teramati terdekat kiri/kanan
-        t = idx.view(1, 1, L, 1)                       # [1,1,L,1]
-        op = obs_pos.view(B, K, 1, L)                  # [B,K,1,L]
-        opl = obs_pos_l.view(B, K, 1, L)
-        # kanan: min pos teramati yang >= t
-        right = torch.where(op >= t, op, torch.full_like(op, big)).min(-1).values   # [B,K,L]
-        # kiri: max pos teramati yang <= t
-        left = torch.where(opl <= t, opl, torch.full_like(opl, -big)).max(-1).values
-
-        # ambil nilai di kiri/kanan (clamp indeks valid)
-        left_i = left.clamp(0, L - 1).long()
-        right_i = right.clamp(0, L - 1).long()
-        xl = torch.gather(x, -1, left_i)
-        xr = torch.gather(x, -1, right_i)
-
-        # bobot interpolasi
-        denom = (right - left).clamp(min=1e-6)
-        w = (idx - left) / denom
-        interp = xl + w * (xr - xl)
-
-        # kasus tepi (tak ada kiri atau kanan) → pakai sisi yang ada; bila tak ada keduanya → mean
-        no_left = left < 0
-        no_right = right > (L - 1)
-        interp = torch.where(no_left, xr, interp)
-        interp = torch.where(no_right, xl, interp)
-        interp = torch.where(no_left & no_right, mu_.expand_as(interp), interp)
-
-        return torch.where(m > 0, x, interp)
+        hf = hi / tot
+        mu = x.mean(-1, keepdim=True); sd = x.std(-1, keepdim=True) + 1e-8
+        kurt = (((x - mu) / sd).pow(4).mean(-1))
+        e = x.pow(2); conc = e.max(-1).values / (e.mean(-1) + 1e-8)
+        return torch.stack([hf, kurt, conc], dim=-1)     # [B,K,3]
 
 
 class DualDomainGate(nn.Module):
