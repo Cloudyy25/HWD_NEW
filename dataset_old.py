@@ -36,9 +36,7 @@ class KDD_DATASET(Dataset):
             self.mask = np.ones_like(self.data)
             self.mask[self.data == -200] = 0
         else:
-            _mech = getattr(configs, 'mechanism', 'mcar')
-            _infix = '' if _mech == 'mcar' else _mech   # mcar: kdd_..., mar: kddmar_...
-            mask_path = (f"Data/mask/kdd/kdd{_infix}_{configs.missing_rate}"
+            mask_path = (f"Data/mask/kdd/kdd_{configs.missing_rate}"
                          f"_{configs.seed}.csv")
             if not os.path.exists(mask_path):
                 raise FileNotFoundError(
@@ -77,9 +75,7 @@ class GUANGZHOU_DATASET(Dataset):
         n_ok = (len(raw) // configs.seq_len) * configs.seq_len
         self.data = raw[:n_ok].reshape(-1, configs.seq_len, configs.enc_in)
 
-        _mech = getattr(configs, 'mechanism', 'mcar')
-        _infix = '' if _mech == 'mcar' else _mech
-        mask_path = (f"Data/mask/guangzhou/guangzhou{_infix}_{configs.missing_rate}"
+        mask_path = (f"Data/mask/guangzhou/guangzhou_{configs.missing_rate}"
                      f"_{configs.seed}.csv")
         if not os.path.exists(mask_path):
             raise FileNotFoundError(
@@ -122,9 +118,7 @@ class PHYSIO_DATASET(Dataset):
             self.mask = np.ones_like(self.data)
             self.mask[self.data == -200] = 0
         else:
-            _mech = getattr(configs, 'mechanism', 'mcar')
-            _infix = '' if _mech == 'mcar' else _mech
-            mask_path = (f"Data/mask/physio/physio{_infix}_{configs.missing_rate}"
+            mask_path = (f"Data/mask/physio/physio_{configs.missing_rate}"
                          f"_{configs.seed}.csv")
             if not os.path.exists(mask_path):
                 raise FileNotFoundError(
