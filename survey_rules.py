@@ -86,7 +86,75 @@ IMK_SKIP_RULES: List[Dict] = [
 # Fungsi utama
 # ─────────────────────────────────────────────────────────
 
-def get_valid_mask(df: pd.DataFrame) -> np.ndarray:
+
+
+# ─────────────────────────────────────────────────────────
+# Skip rules Susenas Kor — Blok Ketenagakerjaan (R703_A, R705, R706, R707)
+#
+# Struktur skip (kuesioner VSEN Kor):
+#   R703_A : "selama seminggu terakhir apakah bekerja?" (diisi 'A' atau kosong).
+#   R705   : "punya pekerjaan/usaha tetapi sementara tidak bekerja?" (1=ya, 5=tidak).
+#            Ditanya HANYA jika R703_A kosong (tidak bekerja).
+#            Jika R703_A terisi 'A'  → R705 = structural missing (wajib kosong).
+#   R706   : lapangan usaha utama — ditanya HANYA jika bekerja.
+#   R707   : status/kedudukan dalam pekerjaan — ditanya HANYA jika bekerja.
+#            "bekerja" = (R703_A terisi 'A') ATAU (R705 = 1).
+#            Jika tidak bekerja → R706, R707 = structural missing.
+#
+# Rules ini memakai kolom turunan _r703_bekerja dan _working yang
+# disiapkan oleh prepare_susenas_columns() di bawah.
+# ─────────────────────────────────────────────────────────
+SUSENAS_SKIP_RULES: List[Dict] = [
+    # R705 structural jika responden bekerja menurut R703_A (terisi 'A')
+    {
+        "if_col"   : "_r703_bekerja",
+        "if_val"   : 1,
+        "null_cols": ["R705"],
+    },
+    # R706 & R707 structural jika TIDAK bekerja (_working = 0)
+    {
+        "if_col"   : "_working",
+        "if_val"   : 0,
+        "null_cols": ["R706", "R707"],
+    },
+]
+
+
+def _is_filled(series: pd.Series) -> pd.Series:
+    """True untuk sel yang terisi (bukan NaN dan bukan string kosong/spasi)."""
+    filled = series.notna()
+    if series.dtype == object:
+        filled = filled & (series.astype(str).str.strip() != "")
+    return filled
+
+
+def prepare_susenas_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Menyiapkan kolom turunan untuk SUSENAS_SKIP_RULES:
+      - _r703_bekerja : 1 jika R703_A terisi (dilingkari 'A' = bekerja), else 0.
+      - _working      : 1 jika bekerja = (_r703_bekerja == 1) atau (R705 == 1), else 0.
+
+    Mengembalikan salinan df dengan kolom turunan ditambahkan.
+    """
+    out = df.copy()
+
+    # _r703_bekerja: apakah R703_A terisi
+    if "R703_A" in out.columns:
+        out["_r703_bekerja"] = _is_filled(out["R703_A"]).astype(int)
+    else:
+        out["_r703_bekerja"] = 0
+
+    # _working: bekerja bila R703_A terisi ATAU R705 == 1
+    r705_yes = pd.Series(False, index=out.index)
+    if "R705" in out.columns:
+        r705_num = pd.to_numeric(out["R705"], errors="coerce")
+        r705_yes = (r705_num == 1)
+    out["_working"] = ((out["_r703_bekerja"] == 1) | r705_yes).astype(int)
+
+    return out
+
+
+def get_valid_mask(df: pd.DataFrame, rules: List[Dict] = None) -> np.ndarray:
     """
     Evaluasi skip rules dan return valid_mask.
 
@@ -98,11 +166,14 @@ def get_valid_mask(df: pd.DataFrame) -> np.ndarray:
                      True  = posisi valid (observed atau M_item)
                      False = M_structural — jangan diimputasi
     """
+    if rules is None:
+        rules = IMK_SKIP_RULES
+
     valid = np.ones((len(df), len(df.columns)), dtype=bool)
 
     col_idx = {col: i for i, col in enumerate(df.columns)}
 
-    for rule in IMK_SKIP_RULES:
+    for rule in rules:
         trigger_col = rule["if_col"]
 
         # Skip rule jika kolom trigger tidak ada di data
@@ -128,16 +199,17 @@ def get_valid_mask(df: pd.DataFrame) -> np.ndarray:
     return valid   # [N, D]
 
 
-def get_structural_mask(df: pd.DataFrame) -> np.ndarray:
+def get_structural_mask(df: pd.DataFrame, rules: List[Dict] = None) -> np.ndarray:
     """
     Kebalikan dari get_valid_mask.
     Return: structural_mask [N, D] — True = M_structural
     """
-    return ~get_valid_mask(df)
+    return ~get_valid_mask(df, rules)
 
 
 def restore_structural(df_imputed: pd.DataFrame,
-                       df_original: pd.DataFrame) -> pd.DataFrame:
+                       df_original: pd.DataFrame,
+                       rules: List[Dict] = None) -> pd.DataFrame:
     """
     Layer 3 post-processing:
     Kembalikan posisi structural missing ke NaN setelah imputasi.
@@ -149,7 +221,7 @@ def restore_structural(df_imputed: pd.DataFrame,
     Returns:
         df_imputed dengan M_structural dikembalikan ke NaN
     """
-    structural = get_structural_mask(df_original)  # [N, D]
+    structural = get_structural_mask(df_original, rules)  # [N, D]
     df_out     = df_imputed.copy()
 
     for j, col in enumerate(df_imputed.columns):
@@ -159,7 +231,8 @@ def restore_structural(df_imputed: pd.DataFrame,
 
 
 def apply_valid_mask_to_numpy(data: np.ndarray,
-                              df_original: pd.DataFrame) -> np.ndarray:
+                              df_original: pd.DataFrame,
+                              rules: List[Dict] = None) -> np.ndarray:
     """
     Helper: apply valid_mask ke numpy array hasil imputasi.
     Posisi structural missing dikembalikan ke np.nan.
@@ -171,7 +244,7 @@ def apply_valid_mask_to_numpy(data: np.ndarray,
     Returns:
         data dengan M_structural = np.nan
     """
-    structural = get_structural_mask(df_original)  # [N, D] bool
+    structural = get_structural_mask(df_original, rules)  # [N, D] bool
     result     = data.copy().astype(float)
     result[structural] = np.nan
     return result
