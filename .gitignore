@@ -1,0 +1,29 @@
+﻿# ── Folder hasil & data besar ──────────────────────
+Hasil Susenas/
+Data and Checkpoint KDD/
+Data/
+Checkpoints/
+outputs/
+
+# ── Format file besar ──────────────────────────────
+*.csv
+*.xlsx
+*.xls
+*.zip
+*.pt
+*.pth
+*.npy
+*.npz
+*.pkl
+*.parquet
+
+# ── Gambar ─────────────────────────────────────────
+*.png
+*.jpg
+*.jpeg
+*.pdf
+
+# ── Python ─────────────────────────────────────────
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
