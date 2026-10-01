@@ -13,6 +13,8 @@ Perubahan dari FGTI:
          approx_encoder (lebih dalam) + detail_encoders (satu per level)
      - _build_conditions: sequential approx→detail via CrossLevelAttention
      - forward(): identik FGTI kecuali kondisi datang dari wavelet
+  6. Flag diagnostik align_guide (bawaan False): guide diinterpolasi sepanjang
+     sumbu waktu lalu disalin ke setiap variabel. Hanya berlaku pada jalur v1.
 """
 
 import math
@@ -174,9 +176,15 @@ class diff_HWD(nn.Module):
         else:
             print(f'[diff_HWD] levels aktif: {self.wav_levels} '
                   f'(wavelet={self.wavelet})')
-        
-        # Flag arsitektur v2 (tiga perbaikan penyaluran sinyal)
+
+        # Flag arsitektur v2 (tiga perbaikan penyaluran sinyal) — tidak dipakai
+        # pada eksperimen skripsi, dipertahankan agar checkpoint lama tetap terbaca
         self.arch_v2 = getattr(configs, 'arch_v2', False)
+
+        # Flag diagnostik F.1: sejajarkan guide dengan sumbu waktu (jalur v1)
+        self.align_guide = getattr(configs, 'align_guide', False)
+        if self.align_guide:
+            print('[diff_HWD] align_guide aktif: guide disejajarkan dengan sumbu waktu')
 
         n_branches       = self.wav_levels + 1   # approx + detail × L
 
@@ -193,7 +201,8 @@ class diff_HWD(nn.Module):
             Conv1d_with_init(configs.d_model, self.channel, 1)
             for _ in range(n_branches)
         ])
-        # PERBAIKAN 3: penggabungan berbobot, bukan rata-rata seragam
+        # PERBAIKAN 3 (v2): penggabungan berbobot, bukan rata-rata seragam.
+        # Tetap dibuat pada v1 karena bobotnya ada di checkpoint yang tersimpan.
         self.branch_merge = Conv1d_with_init(
             self.channel * n_branches, self.channel, 1)
         self.side_projection       = Conv1d_with_init(configs.side_dim, self.channel, 1)
@@ -204,7 +213,7 @@ class diff_HWD(nn.Module):
             embedding_dim=configs.d_model
         )
 
-        # PERBAIKAN 1: kanal input 2 → 1 bila arch_v2 aktif
+        # PERBAIKAN 1 (v2): kanal input 2 → 1 bila arch_v2 aktif
         in_ch = 1 if self.arch_v2 else 2
         self.input_projection    = Conv1d_with_init(in_ch, self.channel, 1)
         self.output_projection1  = Conv1d_with_init(self.channel, self.channel, 1)
@@ -239,11 +248,12 @@ class diff_HWD(nn.Module):
         x_in = torch.cat([x_in, x_in], dim=-1)     # [B, L_l, K*2]  (duplikasi = proxy feat)
         emb  = encoder.encoder(x_in, context_emb=ctx)  # [B, L_l, d_model]
         return emb.permute(0, 2, 1)                 # [B, d_model, L_l]
-    
+
     def _expand_to_KL(self, c: torch.Tensor, K: int, L: int):
         """
-        PERBAIKAN 2: ekspansi [B, ch, L] → [B, ch, K*L] dengan MENGULANG
-        per variabel, bukan interpolasi lintas batas variabel.
+        Ekspansi [B, ch, L] → [B, ch, K*L] dengan MENGULANG per variabel,
+        bukan interpolasi lintas batas variabel. Urutan hasil sama dengan
+        x.reshape(B, C, K*L), sehingga posisi k*L + l menerima waktu l.
         """
         B, ch, _ = c.shape
         return c.unsqueeze(2).expand(-1, -1, K, -1).reshape(B, ch, K * L)
@@ -288,24 +298,30 @@ class diff_HWD(nn.Module):
             ctx = E_d.permute(0, 2, 1)
 
         if self.arch_v2:
-            # PERBAIKAN 2: upsample hanya sampai L (faktor ~4, bukan ~400)
+            # PERBAIKAN 2 (v2): upsample hanya sampai L (faktor ~4, bukan ~400)
             cats = []
             for emb, proj in zip(all_embs, self.branch_projections):
                 c = proj(emb)                                            # [B, ch, L_l]
-                c = F.interpolate(c, size=L, mode='linear', align_corners=False)
+                c = F.interpolate(c, size=L, mode='linear', align_corners=False)  # [B, ch, L]
                 cats.append(c)
-            # PERBAIKAN 3: gabung dengan bobot yang dipelajari
+            # PERBAIKAN 3 (v2): gabung dengan bobot yang dipelajari
             merged = self.branch_merge(torch.cat(cats, dim=1))           # [B, ch, L]
             return self._expand_to_KL(merged, K, L)
 
-        # ── Jalur lama (arch_v1) ───────────────────────────────────
+        # ── Jalur v1 (dipakai pada seluruh eksperimen skripsi) ─────
         total = None
         for emb, proj in zip(all_embs, self.branch_projections):
-            c = proj(emb)
-            c = F.interpolate(c, size=K * L, mode='linear', align_corners=False)
+            c = proj(emb)                                                # [B, ch, L_l]
+            if self.align_guide:
+                # Diagnostik F.1: interpolasi sepanjang waktu, lalu salin per variabel
+                c = F.interpolate(c, size=L, mode='linear', align_corners=False)  # [B, ch, L]
+                c = self._expand_to_KL(c, K, L)                                   # [B, ch, K*L]
+            else:
+                # Perilaku asli v1: interpolasi langsung ke panjang K*L
+                c = F.interpolate(c, size=K * L, mode='linear', align_corners=False)
             total = c if total is None else total + c
         return total / len(all_embs)
-    
+
     def forward(self, total_input, side_info, cond_obs, diffusion_step):
         B, inputdim, K, L = total_input.shape
 
