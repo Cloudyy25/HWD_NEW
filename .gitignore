@@ -32,3 +32,4 @@ __pycache__/
 !hwd_app/model_susenas/*.json
 !hwd_app/results/hwd_results.csv
 .venv/
+!hwd_app/assets/*.png

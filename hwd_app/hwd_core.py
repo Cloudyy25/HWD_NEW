@@ -42,6 +42,8 @@ C_HWD = "#0F6E56"      # HWD
 C_FGTI = "#534AB7"
 C_CSDI = "#7F77DD"
 C_MEAN = "#888780"
+C_MEDIAN = "#B0B0B0"
+C_HOTDECK = "#D9A03C"
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  KONFIGURASI HWD (Tabel 3.5 dan 3.6)
@@ -63,9 +65,9 @@ HWD_SPEC = [
 
 DATASET_INFO = pd.DataFrame([
     ["KDD Cup 2018", "Kualitas udara Beijing", 99, "167 (116/51)", 16, 400, 100, 3407],
-    ["Guangzhou Traffic", "Kecepatan lalu lintas", 214, "183 (128/55)", 4, 800, 100, 3407],
-    ["PhysioNet 2012", "Rekam medis ICU", 36, "–", 16, 50, 10, 3407],
-    ["Susenas KP", "Konsumsi dan pengeluaran RT", 11, "21.432 (seluruh)", 32, 100, 10, 1],
+    ["Guangzhou Traffic", "Kecepatan lalu lintas", 214, "183 (128/55)", 4, 1000, 100, 3407],
+    ["PhysioNet 2012", "Rekam medis ICU", 36, "11.988 (8.391/3.597)", 16, 50, 10, 3407],
+    ["Susenas", "Konsumsi dan pengeluaran RT", 11, "21.432 (seluruh)", 32, 100, 10, 1],
 ], columns=["Dataset", "Domain", "K", "Window (latih/uji)", "Batch", "Epoch",
             "Sampel inferensi", "Seed"])
 
@@ -83,30 +85,42 @@ SUSENAS_COLS = ["R101", "R102", "R105", "R301", "R705", "R706", "R707",
 # ═════════════════════════════════════════════════════════════════════════════
 BASELINES = {
     "KDD Cup 2018": {
-        "MAE":  {"Mean": [0.718, 0.718, 0.717, 0.718],
+        "MAE":  {"Mean": [0.800, 0.796, 0.797, 0.798],
+                 "Median": [0.7813,0.7761,0.7767,0.7768],
+                 "Hot-deck": [0.1976,0.2039,0.2167,0.2324],
                  "CSDI": [0.177, 0.187, 0.199, 0.220],
                  "FGTI": [0.149, 0.161, 0.176, 0.205]},
-        "RMSE": {"Mean": [0.993, 1.007, 0.997, 1.001],
+        "RMSE": {"Mean": [1.075, 1.071, 1.070, 1.075],
+                 "Median":[1.1175,1.1120,1.111,1.1161],
+                 "Hot-deck": [0.576,0.581,0.594,0.616],
                  "CSDI": [0.459, 0.500, 0.519, 0.569],
                  "FGTI": [0.406, 0.451, 0.448, 0.478]},
         "CRPS": {"CSDI": [0.224, 0.245, 0.259, 0.278],
                  "FGTI": [0.158, 0.170, 0.186, 0.216]},
     },
     "Guangzhou Traffic": {
-        "MAE":  {"Mean": [0.592, 0.592, 0.592, 0.592],
+        "MAE":  {"Mean": [0.594, 0.594, 0.594, 0.594],
+                 "Median": [0.5781,0.5784,0.5781,0.5785],
+                 "Hot-deck":[0.2096,0.2163,0.2238,0.2347],
                  "CSDI": [0.210, 0.220, 0.242, 0.283],
                  "FGTI": [0.170, 0.176, 0.202, 0.254]},
-        "RMSE": {"Mean": [0.799, 0.799, 0.799, 0.800],
+        "RMSE": {"Mean": [0.797, 0.799, 0.798, 0.800],
+                 "Median":[0.8054,0.8070,0.8063,0.8076],
+                 "Hot-deck":[0.3116,0.3253,0.3397,0.3598],
                  "CSDI": [0.306, 0.324, 0.364, 0.439],
                  "FGTI": [0.230, 0.258, 0.291, 0.356]},
         "CRPS": {"CSDI": [0.265, 0.277, 0.292, 0.324],
                  "FGTI": [0.155, 0.168, 0.193, 0.243]},
     },
     "PhysioNet 2012": {
-        "MAE":  {"Mean": [0.678, 0.675, 0.676, 0.677],
+        "MAE":  {"Mean": [0.695, 0.695, 0.696, 0.696],
+                 "Median":[0.6774,0.6777,0.6780,0.6780],
+                 "Hot-deck":[0.4435,0.4542,0.4635,0.4769],
                  "CSDI": [0.310, 0.335, 0.360, 0.395],
                  "FGTI": [0.286, 0.309, 0.336, 0.376]},
-        "RMSE": {"Mean": [0.932, 0.935, 0.934, 0.932],
+        "RMSE": {"Mean": [0.937, 0.978, 0.987, 0.983],
+                 "Median":[1.0016,0.9927,1.0010,0.9969],
+                 "Hot-deck":[0.8350,0.8518,0.8541,0.8668],
                  "CSDI": [0.619, 0.664, 0.805, 0.705],
                  "FGTI": [0.580, 0.577, 0.624, 0.669]},
         "CRPS": {"CSDI": [0.544, 0.589, 0.627, 0.671],
@@ -124,7 +138,9 @@ DEFAULT_HWD_RESULTS = pd.DataFrame([
 
 ABLATION_LABEL = {"full": "HWD lengkap",
                   "no_wavelet": "Tanpa wavelet conditioning",
-                  "no_crosslevel": "Tanpa cross-level attention"}
+                  "no_crosslevel": "Tanpa cross-level attention",
+                  "no_conditioning": "Tanpa Conditioning",
+                  "guide": "Guide diinterpolasi sepanjang sumbu waktu"}
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  SURVEY RULE ENGINE — memakai survey_rules.py dari repo bila tersedia,

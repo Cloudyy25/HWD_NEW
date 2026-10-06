@@ -113,8 +113,7 @@ HWD dibangun di atas basis kode FGTI (Yang et al., 2024) dengan tiga perubahan.
 
 **Wavelet conditioning.** Nilai kondisi diurai dengan DWT Daubechies-2 tiga tingkat menjadi
 koefisien aproksimasi A₃ (tren global) serta detail D₃, D₂, dan D₁ (variasi kasar sampai halus).
-Pada window 48 titik, panjang keempat cabang adalah 8, 8, 14, dan 25 titik. Daubechies-4 tidak
-dipakai karena filternya yang lebih panjang hanya menyisakan satu tingkat dekomposisi pada L = 48.
+Pada window 48 titik, panjang keempat cabang adalah 8, 8, 14, dan 25 titik.
 
 **Cross-level attention.** Setiap encoder detail menerima konteks dari tingkat di atasnya
 secara berurutan, dari A₃ ke D₁, sehingga rekonstruksi fluktuasi halus mengikuti tren global.
@@ -132,11 +131,11 @@ selisih kinerja dapat ditelusuri ke jalur conditioning.
             st.caption("Letakkan ekspor Gambar 3.3 di assets/gambar_3_3_arsitektur.png "
                        "untuk menampilkan diagram arsitektur di sini.")
     with c2:
-        st.markdown('<div class="section-title">Spesifikasi (Tabel 3.5)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Spesifikasi </div>', unsafe_allow_html=True)
         st.dataframe(pd.DataFrame(HWD_SPEC, columns=["Komponen", "Nilai"]),
                      hide_index=True, width="stretch")
 
-    st.markdown('<div class="section-title">Dataset dan konfigurasi per dataset (Tabel 3.6)</div>',
+    st.markdown('<div class="section-title">Dataset dan konfigurasi per dataset</div>',
                 unsafe_allow_html=True)
     st.dataframe(DATASET_INFO, hide_index=True, width="stretch")
     st.markdown('<div class="note">Seluruh metrik dihitung pada skala Z-score dan hanya pada posisi '
@@ -213,7 +212,7 @@ elif page == "Benchmark":
     st.caption(f"Sumber: Mean, CSDI, FGTI dari Yang et al. (2024), MAE dan RMSE Tabel 1, CRPS Tabel 5 (MCAR). "
                f"HWD dari eksperimen penelitian ini ({res_src}), mode benchmark.")
 
-    st.markdown('<div class="section-title">Ablation study (Tabel 4.4)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Ablation study</div>', unsafe_allow_html=True)
     abl = res[res["konfigurasi"].isin(ABLATION_LABEL.keys())]
     abl = abl[(abl["dataset"] == "KDD Cup 2018") & (abl["missing_rate"] == 10)]
     if len(abl):
@@ -237,7 +236,7 @@ elif page == "Benchmark":
 
     sus = res[res["dataset"].str.contains("Susenas", case=False, na=False)]
     if len(sus):
-        st.markdown('<div class="section-title">Susenas KP</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Susenas</div>', unsafe_allow_html=True)
         st.dataframe(sus, hide_index=True, width="stretch")
         st.caption("CRPS Susenas dihitung dengan properscoring dan tidak sebanding dengan CRPS benchmark.")
 
@@ -265,7 +264,7 @@ elif page == "Visualisasi Hasil":
 
         if not (f_data and f_imp and f_ev):
             st.info("Unggah minimal tiga berkas: data, imputed, dan evalmask. Berkas ini disimpan "
-                    "oleh sel ‘Simpan + line chart’ di notebook KDD maupun Susenas.")
+                    "oleh sel ‘Simpan + line chart’ di notebook.")
         else:
             data, imp, ev = load_npy(f_data), load_npy(f_imp), load_npy(f_ev).astype(bool)
             cm = load_npy(f_cm) if f_cm else None
@@ -503,10 +502,10 @@ elif page == "Imputasi Susenas":
     o1, o2, o3 = st.columns(3)
     n_samples = o1.slider("Jumlah sampel", 1, 20, 10, help="Eksperimen skripsi memakai 10 sampel.")
     replace_out = o2.checkbox("Ganti nilai outlier dengan hasil imputasi", value=False,
-                              help="Bawaannya mati: nilai outlier asli dipertahankan di berkas keluaran.")
+                              help="Jika tidak dicentang, nilai outlier asli tetap dipertahankan.")
     snap = o3.checkbox("Bulatkan variabel kode ke kode yang sah", value=True)
     st.caption(f"Beban komputasi: {math.ceil(W / 8) * n_samples * 50:,} forward pass. ".replace(",", ".")
-               + "Di CPU, perkiraannya sekitar setengah sampai dua menit untuk 10 sampel.")
+               + "Di CPU, perkiraannya sekitar 5 menit untuk 10 sampel.")
 
     sig = (f_data.name, f_data.size, mode, mech, rate, int(seed), n_samples, replace_out, snap,
            hashlib.md5(ckpt_bytes).hexdigest())
@@ -588,9 +587,9 @@ elif page == "Imputasi Susenas":
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "Demo Inferensi":
     st.markdown("## Demo inferensi")
-    st.markdown('<div class="note">Unggah data, sembunyikan sebagian nilai secara artifisial, lalu '
-                'isi dengan HWD (butuh checkpoint) atau dengan metode pembanding sederhana. '
-                'Metrik dihitung pada posisi yang disembunyikan.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="note"> Unggah data, sembunyikan sebagian nilai secara artifisial,' 
+                'kemudian lakukan imputasi menggunakan HWD atau metode pembanding sederhana.' 
+                'Penggunaan HWD memerlukan *checkpoint*. Metrik evaluasi dihitung berdasarkan posisi nilai yang sengaja disembunyikan.</div>', unsafe_allow_html=True)
 
     f_csv = st.file_uploader("CSV data (baris = waktu atau rumah tangga, kolom = variabel)", type=["csv"])
     if not f_csv:
