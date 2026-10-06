@@ -1,0 +1,10 @@
+# Versi CPU PyTorch agar ringan di Streamlit Community Cloud
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.2
+streamlit>=1.50
+numpy>=1.24
+pandas>=2.1,<3  # samakan dengan lingkungan Kaggle/Colab
+matplotlib>=3.7
+PyWavelets>=1.4
+properscoring>=0.1
+openpyxl>=3.1
