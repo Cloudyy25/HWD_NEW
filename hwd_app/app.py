@@ -126,7 +126,7 @@ selisih kinerja dapat ditelusuri ke jalur conditioning.
         """)
         img = APP_DIR / "assets" / "gambar_3_3_arsitektur.png"
         if img.exists():
-            st.image(str(img), caption="Arsitektur HWD (Gambar 3.3)", width="stretch")
+            st.image(str(img), caption="Arsitektur HWD", width="stretch")
         else:
             st.caption("Letakkan ekspor Gambar 3.3 di assets/gambar_3_3_arsitektur.png "
                        "untuk menampilkan diagram arsitektur di sini.")

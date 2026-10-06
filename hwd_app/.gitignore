@@ -1,0 +1,4 @@
+!hwd_app/model_susenas/*.pt
+!hwd_app/model_susenas/*.json
+!hwd_app/results/hwd_results.csv
+.venv/
