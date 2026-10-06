@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
 
 from hwd_core import (
-    APP_DIR, REPO_DIR, SEQ_LEN, SENTINEL, RATES,
+    APP_DIR, C_HOTDECK, C_MEDIAN, REPO_DIR, SEQ_LEN, SENTINEL, RATES,
     C_OBS, C_EVAL, C_NAT, C_SPAN, C_HWD, C_FGTI, C_CSDI, C_MEAN,
     HWD_SPEC, DATASET_INFO, BASELINES, DEFAULT_HWD_RESULTS, ABLATION_LABEL,
     RULE_SOURCE, prepare_susenas, valid_mask_fn, restore_fn, _is_filled,
@@ -177,7 +177,7 @@ elif page == "Benchmark":
             st.info(f"Belum ada hasil {metric} untuk {dataset}.")
         else:
             fig, ax = plt.subplots(figsize=(7, 3.8))
-            colors = {"Mean": C_MEAN, "CSDI": C_CSDI, "FGTI": C_FGTI, "HWD": C_HWD}
+            colors = {"Mean": C_MEAN, "Median":C_MEDIAN, "Hot-deck":C_HOTDECK, "CSDI": C_CSDI, "FGTI": C_FGTI, "HWD": C_HWD}
             for mth, y in series.items():
                 ax.plot(RATES, y, marker="o", lw=2.4 if mth == "HWD" else 1.4,
                         ls="-" if mth == "HWD" else "--", color=colors[mth], label=mth)
