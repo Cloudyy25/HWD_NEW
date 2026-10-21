@@ -1,6 +1,6 @@
 # Hierarchical Wavelet Diffusion (HWD)
 
-Repositori kode penelitian skripsi **Cloudya Qashwah Montolalu** mengenai *Hierarchical Wavelet Diffusion* (HWD) untuk imputasi data hilang pada data survei. HWD menggabungkan *conditional diffusion*, dekomposisi wavelet multilevel, dan *cross-level attention*. Penelitian mengevaluasi model pada tiga dataset benchmark dan data pengeluaran rumah tangga Susenas, serta menerapkan aturan kuesioner untuk mempertahankan sel *structural missing* tetap kosong.
+Repositori kode penelitian skripsi **Cloudya Qashwah Montolalu** mengenai *Hierarchical Wavelet Diffusion* (HWD) untuk imputasi data hilang pada data survei. HWD menggabungkan *conditional diffusion*, dekomposisi wavelet multilevel, dan *cross-level attention*. Penelitian mengevaluasi model pada tiga dataset benchmark dan data rumah tangga Susenas, serta menerapkan aturan kuesioner untuk mempertahankan sel *structural missing* tetap kosong.
 
 **Penulis:** Cloudya Qashwah Montolalu  
 **Kontak:** [cloudyamontolalu4@gmail.com](mailto:cloudyamontolalu4@gmail.com)  
