@@ -39,7 +39,7 @@ HWD_Colab_susenas.ipynb  Notebook eksperimen Susenas
 dataset.py               Pemuatan dan penyiapan dataset
 generate_missing.py      Pembentukan pola data hilang
 incremental.py           Kode eksperimen incremental
-survey_rules.py          Aturan kuesioner (*survey rule engine*)
+survey_rules.py          Aturan kuesioner (survey rule engine)
 train.py                 Pelatihan model
 utils.py                 Fungsi pendukung
 .gitignore               Aturan berkas yang diabaikan Git
